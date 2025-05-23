@@ -36,11 +36,15 @@ def main():
         name, ext = os.path.splitext(input_filename)
         output_video_path = os.path.join(args.output_dir, f"{name}_processed.avi")
         fps = media_loader.cap.get(cv2.CAP_PROP_FPS)
+        print(f"Input video FPS: {fps}") # Verify the FPS
+        if fps <= 0:
+            fps = 30.0 # Set a default FPS if the input FPS is invalid
+            print(f"Warning: Invalid FPS in input video, setting FPS to {fps}")
         frame_width = int(media_loader.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(media_loader.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')  # You can try other codecs like 'MJPG', 'AVC1'
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Try 'MJPG' or 'AVC1' if 'XVID' doesn't work
         video_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
-        print(f"Saving processed video to: {output_video_path}")
+        print(f"Saving processed video to: {output_video_path} with FPS: {fps} and dimensions: ({frame_width}, {frame_height})")
     elif args.save_video and not media_loader.is_video:
         print("Warning: --save_video is enabled, but the input is not a video. No video will be saved.")
 
@@ -95,9 +99,11 @@ def main():
                                          thickness=CONFIG["drawing"]["contours"]["thickness"],
                                          aspect_ratio_threshold=CONFIG["drawing"]["contours"]["aspect_ratio_threshold"])
 
-        # Save the processed frame to the video if video_writer is initialized
+        # Save the processed frame (original size with overlays) to the video
         if video_writer is not None:
-            video_writer.write(canvas)
+            h = canvas.shape[0] // 2  # Original height
+            original_frame_with_overlay = canvas[h:, :]
+            video_writer.write(original_frame_with_overlay)
 
         # Display the result
         visualizer.display(canvas, frame_number, timestamp)
