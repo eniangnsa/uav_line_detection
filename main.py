@@ -1,11 +1,15 @@
 import os
 import argparse
 import cv2
+import numpy as np # Added for general numpy operations if needed
+
+# Import classes from their respective files
 from config import CONFIG
 from media_loader import MediaLoader
 from geometry_correction import GeometryCorrector
-from preprocessing import Preprocessor, MorphologyProcessor
-from contour_detection import ContourDetector, LineDetector
+from preprocessing import Preprocessor, MorphologyProcessor # Preprocessor classs
+from contour_detection import ContourDetector, ContourSelector, LineDetector # ContourDetector and new ContourSelector
+
 from drawing import Drawer
 from visualization import Visualizer
 
@@ -25,7 +29,18 @@ def main():
     preprocessor = Preprocessor()
     morphology_processor = MorphologyProcessor(kernel_size=CONFIG["preprocessing"]["morphological_opening"]["kernel_size"])
     line_detector = LineDetector()
+    
+    # Initialize ContourDetector and the new ContourSelector
     contour_detector = ContourDetector()
+    contour_selector = ContourSelector(
+        min_area=CONFIG["contour_selection"]["min_area"],
+        max_aspect_ratio=CONFIG["contour_selection"]["max_aspect_ratio"],
+        min_height_ratio=CONFIG["contour_selection"]["min_height_ratio"],
+        max_approx_vertices=CONFIG["contour_selection"]["max_approx_vertices"],
+        min_approx_vertices=CONFIG["contour_selection"]["min_approx_vertices"],
+        top_bottom_tolerance=CONFIG["contour_selection"]["top_bottom_tolerance"]
+    )
+
     drawer = Drawer(neutral_color=CONFIG["drawing"].get("neutral_color", (128, 128, 128)))
     visualizer = Visualizer()
 
@@ -54,6 +69,9 @@ def main():
         if frame is None:
             break
 
+        # Get frame dimensions for contour selection
+        frame_height, frame_width = frame.shape[:2]
+
         # Apply fisheye correction
         if CONFIG["fisheye_correction"]["enabled"]:
             frame = geometry_corrector.apply_fisheye_correction(frame)
@@ -72,20 +90,33 @@ def main():
         # Edge detection
         edges = cv2.Canny(binary, 30, 100)
 
-        # Detect lines and contours
-        lines = line_detector.detect(edges,
-                                     threshold=CONFIG["line_detection"]["threshold"],
-                                     min_line_length=CONFIG["line_detection"]["min_line_length"],
-                                     max_line_gap=CONFIG["line_detection"]["max_line_gap"]) if CONFIG["line_detection"]["enabled"] else None
+        # Detect lines using Hough Transform
+        hough_lines = None
+        if CONFIG["line_detection"]["enabled"]:
+            hough_lines = line_detector.detect(edges,
+                                             threshold=CONFIG["line_detection"]["threshold"],
+                                             min_line_length=CONFIG["line_detection"]["min_line_length"],
+                                             max_line_gap=CONFIG["line_detection"]["max_line_gap"])
 
-        contours = contour_detector.detect(binary) if CONFIG["contour_detection"]["enabled"] else None
+        # Detect and select the best contour
+        all_contours = None
+        best_contour = None
+        fitted_line_from_contour = None
+
+        if CONFIG["contour_detection"]["enabled"]:
+            all_contours = contour_detector.detect(binary)
+            if all_contours: # Only try to select if contours were found
+                best_contour, fitted_line_from_contour = contour_selector.select_and_process_contour(
+                    all_contours, frame_height, frame_width
+                )
 
         # Prepare canvas with extra space above the image
         canvas = drawer.prepare_canvas(frame)
 
         # Draw detected elements
-        if CONFIG["drawing"]["lines"]["enabled"] and lines is not None:
-            for line in lines:
+        # Draw Hough lines if enabled
+        if CONFIG["drawing"]["lines"]["enabled"] and hough_lines is not None:
+            for line in hough_lines:
                 x1, y1, x2, y2 = line[0]
                 canvas = drawer.plot_extrapolated_line(
                     canvas, x1, y1, x2, y2,
@@ -93,17 +124,44 @@ def main():
                     thickness=CONFIG["drawing"]["lines"]["thickness"]
                 )
 
-        if CONFIG["drawing"]["contours"]["enabled"] and contours is not None:
-            canvas = drawer.draw_contours(canvas, contours,
-                                         color=CONFIG["drawing"]["contours"]["color"],
-                                         thickness=CONFIG["drawing"]["contours"]["thickness"],
-                                         aspect_ratio_threshold=CONFIG["drawing"]["contours"]["aspect_ratio_threshold"])
+        # Draw the selected contour and its fitted line if found
+        if CONFIG["drawing"]["contours"]["enabled"] and best_contour is not None:
+            # Draw the selected contour
+            # Adjust the contour's y-coordinates to account for the vertical shift on canvas
+            original_height_on_canvas = canvas.shape[0] // 2
+            shifted_best_contour = best_contour.copy()
+            shifted_best_contour[:, :, 1] += original_height_on_canvas
+            cv2.drawContours(canvas, [shifted_best_contour], -1, 
+                             CONFIG["drawing"]["contours"]["color"], 
+                             CONFIG["drawing"]["contours"]["thickness"])
 
+            # Draw the fitted line from the contour
+            if fitted_line_from_contour is not None:
+                x1, y1, x2, y2 = fitted_line_from_contour
+                # Since the fitted line is calculated for the original frame dimensions,
+                # we need to adjust its y-coordinates for the canvas display.
+                canvas = drawer.plot_extrapolated_line(
+                    canvas, x1, y1, x2, y2,
+                    color=CONFIG["drawing"]["contour_fitted_line"]["color"], # Use a distinct color for fitted line
+                    thickness=CONFIG["drawing"]["contour_fitted_line"]["thickness"]
+                )
+        
         # Save the processed frame (original size with overlays) to the video
         if video_writer is not None:
-            h = canvas.shape[0] // 2  # Original height
-            original_frame_with_overlay = canvas[h:, :]
-            video_writer.write(original_frame_with_overlay)
+            # The canvas has double the height, we only want the original frame area with overlays
+            h_original_frame = frame.shape[0] # This is the original frame height
+            processed_frame_for_video = canvas[h_original_frame:, :] # Get the bottom half of the canvas
+            
+            # Ensure the frame being written matches the dimensions initialized for video_writer
+            # If the original frame was resized by MediaLoader, the video_writer should match that size.
+            # Here, we assume frame_width and frame_height from media_loader.cap.get() are correct.
+            if processed_frame_for_video.shape[1] != frame_width or processed_frame_for_video.shape[0] != frame_height:
+                # This case should ideally not happen if MediaLoader's resizing is consistent
+                # with initial video_writer dimensions, but adding a resize as a safeguard.
+                processed_frame_for_video = cv2.resize(processed_frame_for_video, (frame_width, frame_height))
+            
+            video_writer.write(processed_frame_for_video)
+
 
         # Display the result
         visualizer.display(canvas, frame_number, timestamp)
